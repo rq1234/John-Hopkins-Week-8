@@ -1,0 +1,215 @@
+---
+title: "Practical Machine Learning Wk4 Assignment"
+author: "manifits"
+date: "March 8, 2017"
+output: html_document
+---
+
+# Background
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of 
+data about personal activity relatively inexpensively. One thing that people regularly do is 
+quantify how much of a particular activity they do, but they rarely quantify how well they do it. 
+
+In this project, the goal is to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. 
+They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. 
+More information is available from the website: http://groupware.les.inf.puc-rio.br/har 
+(see the section on the Weight Lifting Exercise Dataset).
+   
+   
+# Load and clean the data
+   
+Load the training and testing data from the given links. We will then remove mostly zero columns and unrelevant
+variables from the data set. We also remove near zero variance variables as they have very few unique values 
+relative to the number of samples and may not make good predictors.
+   
+   
+```{r}
+filename1 <- "training.csv"
+filename2 <- "testing.csv"
+
+if (!file.exists(filename1)){
+  fileURL <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+  download.file(fileURL, filename1)
+}
+training <- read.csv("training.csv", na.strings=c("NA", ""))
+
+if (!file.exists(filename2)){
+  fileURL <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+  download.file(fileURL, filename2)
+}
+testing <- read.csv("testing.csv", na.strings=c("NA", ""))
+
+dim(training)
+dim(testing)
+
+# Remove variables that are mostly (>90%) NAs from the training set
+training1 <- training[,colSums(!is.na(training))>nrow(training)*0.9]
+dim(training1)
+
+# Remove unrelevant variables like index, user name, time stamps and windows, i.e. columns 1 to 7
+training1 <- training1[,-c(1:7)]
+dim(training1)
+
+# Remove Near Zero Variance predictors as they have very few unique values relative to the number of samples 
+library(caret)
+nearZeroVar(training1, freqCut=95/5, saveMetrics = FALSE)
+dim(training1)
+```
+   
+   
+The last step did not remove additional variables. We have a total of 52 variables to predict classe (which is the 
+53rd column of the dataset.)
+   
+   
+# Split training data and keep testing data for validation
+   
+```{r}
+# Partition training data into training set to build the model and testing set to predict and test model accuracy.
+set.seed(123)
+inTrain = createDataPartition(training1$classe, p=0.60, list=FALSE)
+train1 = training1[inTrain,]
+test1 = training1[-inTrain,]
+dim(train1)
+dim(test1)
+```
+   
+   
+# Build the model
+   
+I will fit the following three models on the training set and check which provides the best out-of-sample accuracy with 
+the testing set:   
+1. CART - classificaiton and regression tree, "rpart"   
+2. GBM - Gradient boosting machine, "gbm"   
+3. Random Forest - "rf"   
+   
+I will use k fold cross validation with k=5.
+   
+   
+```{r}
+fitControl <- trainControl(method="cv", number=5)
+
+# (1) CART model
+library(rpart)
+library(rattle)
+modCART <- train(classe ~., method="rpart", data=train1)
+print(modCART$finalModel)
+fancyRpartPlot(modCART$finalModel)
+
+# (2) Gradient boosting machine model
+set.seed(123)
+library(gbm)
+modGBM <- train(classe ~., method="gbm", trControl=fitControl, data=train1, verbose=FALSE)
+modGBM
+
+# (3) Random forest model with all predictors
+library(randomForest)
+modRF <- randomForest(classe~., method="rf", importance=TRUE, ntree=100, data=train1)
+modRF
+varImpPlot(modRF)
+
+
+# Save the models
+saveRDS(modGBM, "modGBM.Rds")
+saveRDS(modRF, "modRF.Rds")
+modGBM <- readRDS("modGBM.Rds")
+modRF <- readRDS("modRF.Rds")
+```
+   
+   
+For the random forest model, we want to see if just taking the top 10 most important variables, hence a simpler model, 
+changes the prediction accuracy significantly. We need to check for correlation within these 10 variables and remove
+variables that are highly correlated.
+   
+   
+```{r}
+# Check correlation within top 10 important variables
+corRF <- cor(train1[,c("roll_belt","pitch_belt","yaw_belt","magnet_dumbbell_y", 
+                       "magnet_dumbbell_z","pitch_forearm", "magnet_forearm_z", 
+                       "roll_arm", "gyros_dumbbell_z","gyros_arm_y")])
+diag(corRF) <- 0
+which(abs(corRF)>0.7,arr.ind=TRUE)
+
+corRF1 <- cor(train1[,c("roll_belt","pitch_belt","magnet_dumbbell_y", 
+                       "magnet_dumbbell_z","pitch_forearm", "magnet_forearm_z", 
+                       "roll_arm", "gyros_dumbbell_z","gyros_arm_y")])
+diag(corRF1) <- 0
+max(corRF1)
+```
+   
+    
+We see that roll_belt and yaw_belt are highly correlated. We will keep roll_belt since this appears as the first variable in 
+the rpart tree. By removing yaw_belt, the maximum correlation of the remaining 9 variables is less than 0.4. 
+We will create a simpler random forest model based on the 9 variables using the caret package.
+       
+   
+```{r}
+# (4) Random forest model with 9 predictors
+modRFc<- train(classe~roll_belt+pitch_belt+magnet_dumbbell_y+magnet_dumbbell_z+
+                 pitch_forearm+magnet_forearm_z+roll_arm+gyros_dumbbell_z+
+                 gyros_arm_y, method="rf", trControl=fitControl, data=train1)
+#modRFc<- train(classe~., method="rf", trControl=fitControl, data=train1)
+modRFc
+
+# Save the model
+saveRDS(modRFc, "modRFc.Rds")
+modRFc <- readRDS("modRFc.Rds")
+```
+   
+   
+# Predict and check accuracy of the models
+   
+We will predict using the testing set on the three models and compare the accuracy.
+   
+   
+```{r}
+predCART <- predict(modCART, newdata=test1)
+cmCART <- confusionMatrix(predCART, test1$classe)
+
+predGBM <- predict(modGBM, newdata=test1)
+cmGBM <- confusionMatrix(predGBM, test1$classe)
+
+predRF <- predict(modRF, newdata=test1)
+cmRF <- confusionMatrix(predRF, test1$classe)
+
+predRFc <- predict(modRFc, newdata=test1)
+cmRFc <- confusionMatrix(predRFc, test1$classe)
+
+AccuracyResults <- data.frame(
+  Model = c('CART', 'GBM', 'RF', 'RFc'),
+  Accuracy = rbind(cmCART$overall[1], cmGBM$overall[1], cmRF$overall[1], cmRFc$overall[1])
+)
+print(AccuracyResults)
+```
+    
+The random forest model performs better than rpart with the gbm model close behind.   
+The simpler random forest model with 9 predictors has only slightly less accuracy than the model with 27 predictors.  
+The out of sample error for this model is 100% - accuracy = 1.59%.  
+   
+   
+# Predict classe for the testing data
+    
+We will use the 9 predictor random forest model to predict classe for the 20 observations in the testing data.
+   
+```{r} 
+predTest <- predict(modRFc, newdata=testing)
+predResult <- data.frame(
+  problem_id=testing$problem_id,
+  predicted=predTest
+)
+print(predResult)
+```
+   
+   
+# Conclusion
+   
+We fit the CART, GBM and RF model to the training data. The GBM and RF model outperforms the CART model with the RF model 
+having better accuracy. The 9 predictor random forest model, RFc, loses slight accuracy over the 27 predictor model. 
+We use the simpler model to predict the testing set with good accuracy. We then use the model to predict the 20 observations'
+in the testing data.
+
+We removed 100 predictors with mostly NA values before building the model. We need to find out why there are so many missing values 
+in the data and validate that it is valid. The accuracy from the random forest model is very high, so we need to test the model with a 
+different set of participants to validate the results. We also need to check with subject matter experts if the variables we discarded 
+or added in the final model makes sense.
+
+
