@@ -1,7 +1,7 @@
 ---
 title: "Practical Machine Learning Wk4 Assignment"
-author: "manifits"
-date: "March 8, 2017"
+author: "Rong Quan"
+date: "June 3 2024"
 output: html_document
 ---
 
